@@ -339,7 +339,8 @@ def main():
         road_info = config['roads'][road_name]
         link_id = road_info['link_id']
         capacity = road_info['capacity_vph']
-        link_length_m = road_info['link_length_m']
+        link_length_m = road_info.get('link_length_m', road_info.get('length_km', 2.7138037) * 1000)
+        snapshot_csv = road_info.get('snapshot_csv')
         
         print(f"\n处理路段: {road_name} (LinkID: {link_id})")
         
@@ -347,6 +348,7 @@ def main():
         df_final = build_finaldata(
             link_id=link_id,
             precleaned_path=config['data']['precleaned_file'],
+            snapshot_csv_path=snapshot_csv,
             capacity=capacity,
             link_length_m=link_length_m,
             month_start=config.get('data', {}).get('month_start'),
@@ -422,7 +424,11 @@ def main():
         
         # 5. 保存结果
         print("\n步骤 5: 保存结果...")
-        output_dir = Path(config.get('output', {}).get('dir', 'outputs')) / road_name
+        output_base = Path(config.get('output', {}).get('dir', 'outputs'))
+        # 确保输出目录是绝对路径
+        if not output_base.is_absolute():
+            output_base = Path(__file__).parent / output_base
+        output_dir = output_base / road_name
         
         if config.get('output', {}).get('save_summary', True):
             save_results(road_results, output_dir, road_name)

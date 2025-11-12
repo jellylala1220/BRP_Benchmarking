@@ -11,30 +11,55 @@ roads:
   M67_115030402:
     link_id: 115030402
     link_name: "M67 westbound between J4 and J3"
-    length_km: 2.7138037  # 2713.8037m
+    link_length_m: 2713.8037  # 路段长度（米）
+    length_km: 2.7138037  # 2713.8037m（保留兼容）
     capacity_vph: 6649  # vehicles per hour
+    snapshot_csv: "../Data/M67 westbound between J4 and J3 mainCarriageway 115030402.csv"
     description: "主要测试路段"
 
 # 要测试的路段列表
 roads_to_test:
   - M67_115030402
 
-# 模型配置
+# 模型配置（使用新架构的模型名称）
 models_to_run:
-  # 组A: BPR参数估计方法
-  - ClassicalBPR      # 经典BPR (α=0.15, β=4.0)
-  - NLS_BPR          # 非线性最小二乘法
-  - LogLinearBPR     # 对数线性回归
+  # M0: 基准BPR模型
+  - M0  # 支持方法: classical, loglinear, nls
   
-  # 组B: 机器学习方法
-  - SVR              # 支持向量回归
-  - DecisionTree     # 决策树
-  - RandomForest     # 随机森林
-  - GradientBoosting # 梯度提升
-  - NeuralNetwork    # 神经网络
+  # M1: 动态参数BPR
+  # - M1  # 支持方法: classical, loglinear, nls
   
-  # 组C: 可靠性/不确定性方法
-  - BayesianBPR      # 贝叶斯回归
+  # M2: 基本图VDF
+  # - M2  # 支持方法: tree, rf, gbdt
+  
+  # M3: 多类别BPR
+  # - M3  # 支持方法: classical, loglinear, nls
+  
+  # M4: 外部因素BPR
+  # - M4  # 支持方法: tree, rf, gbdt
+  
+  # M5: ML混合BPR
+  # - M5  # 支持方法: svr, tree, rf, gbdt, nn
+  
+  # M6: 可靠性BPR
+  # - M6  # 支持方法: bayes
+
+# 估计方法配置
+methods_to_run:
+  # BPR参数估计方法
+  - classical      # 经典BPR (α=0.15, β=4.0)
+  - loglinear     # 对数线性回归
+  - nls           # 非线性最小二乘法
+  
+  # 机器学习方法（需要配合M5使用）
+  # - svr
+  # - tree
+  # - rf
+  # - gbdt
+  # - nn
+  
+  # 贝叶斯方法（需要配合M6使用）
+  # - bayes
 
 # 特征配置 (对应M1-M6的概念)
 features:
