@@ -558,8 +558,56 @@ def build_finaldata(
     df['v_avg_kmh'] = calculate_weighted_avg_speed(df)
     
     # Fused行程时间（Ground Truth）
-    link_length_km = link_length_m / 1000
-    df['fused_tt_15min'] = (link_length_km / df['v_avg_kmh']) * 3600
+    # 优先使用CSV文件中的"Fused Travel Time"（如果提供）
+    if snapshot_csv_path and Path(snapshot_csv_path).exists():
+        print(f"  从CSV文件读取Fused Travel Time: {snapshot_csv_path}")
+        try:
+            df_csv = pd.read_csv(snapshot_csv_path)
+            
+            # 创建时间戳用于对齐
+            if 'Local Date' in df_csv.columns and 'Local Time' in df_csv.columns:
+                df_csv['datetime_csv'] = pd.to_datetime(
+                    df_csv['Local Date'] + ' ' + df_csv['Local Time'],
+                    format='%Y-%m-%d %H:%M:%S'
+                )
+            else:
+                raise ValueError("CSV文件缺少日期时间列")
+            
+            # 对齐时间戳（使用merge_asof进行最近邻匹配）
+            df_sorted = df.sort_values('datetime')
+            df_csv_sorted = df_csv.sort_values('datetime_csv')
+            
+            df_merged = pd.merge_asof(
+                df_sorted,
+                df_csv_sorted[['datetime_csv', 'Fused Travel Time']],
+                left_on='datetime',
+                right_on='datetime_csv',
+                direction='nearest',
+                tolerance=pd.Timedelta(minutes=15)  # 允许15分钟内的匹配
+            )
+            
+            # 使用CSV中的Fused Travel Time
+            df['fused_tt_15min'] = df_merged['Fused Travel Time'].values
+            
+            # 检查匹配率
+            matched = df['fused_tt_15min'].notna().sum()
+            print(f"  ✓ 成功匹配 {matched}/{len(df)} 条记录 ({matched/len(df)*100:.1f}%)")
+            
+            # 如果匹配率太低，回退到计算值
+            if matched < len(df) * 0.8:
+                print(f"  警告：匹配率较低，部分使用计算值")
+                link_length_km = link_length_m / 1000
+                calculated_tt = (link_length_km / df['v_avg_kmh']) * 3600
+                df['fused_tt_15min'] = df['fused_tt_15min'].fillna(calculated_tt)
+        except Exception as e:
+            print(f"  警告：无法从CSV读取Fused Travel Time ({e})，使用计算值")
+            link_length_km = link_length_m / 1000
+            df['fused_tt_15min'] = (link_length_km / df['v_avg_kmh']) * 3600
+    else:
+        # 如果没有提供CSV或CSV不存在，使用计算值
+        print(f"  使用计算值（从速度和长度计算）")
+        link_length_km = link_length_m / 1000
+        df['fused_tt_15min'] = (link_length_km / df['v_avg_kmh']) * 3600
     
     # 处理异常值
     df['fused_tt_15min'] = df['fused_tt_15min'].replace([np.inf, -np.inf], np.nan)
