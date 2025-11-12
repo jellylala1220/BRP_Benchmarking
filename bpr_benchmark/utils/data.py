@@ -466,29 +466,48 @@ def build_finaldata(
     
     print(f"  找到 {len(df)} 条记录")
     
-    # 2. 时间筛选
-    if month_start or month_end:
-        print(f"\n[2/8] 时间筛选...")
-        if 'MeasurementStartUTC' in df.columns:
-            df['datetime'] = pd.to_datetime(df['MeasurementStartUTC'])
-        else:
-            time_cols = [col for col in df.columns if 'time' in col.lower() or 'date' in col.lower()]
-            if time_cols:
-                df['datetime'] = pd.to_datetime(df[time_cols[0]])
+    # 2. 时间筛选和创建datetime
+    print(f"\n[2/8] 处理时间戳...")
+    
+    # Precleaned数据使用MeasurementDateAdjusted和TimePeriod15MinGroup
+    if 'MeasurementDateAdjusted' in df.columns and 'TimePeriod15MinGroup' in df.columns:
+        # TimePeriod15MinGroup是整数（0-95），代表一天中的96个15分钟时间段
+        # 0 = 00:00, 1 = 00:15, 2 = 00:30, ..., 95 = 23:45
         
+        df['date'] = pd.to_datetime(df['MeasurementDateAdjusted'])
+        
+        # 将TimePeriod15MinGroup转换为分钟数，然后添加到日期上
+        df['minutes'] = df['TimePeriod15MinGroup'] * 15
+        df['datetime'] = df['date'] + pd.to_timedelta(df['minutes'], unit='m')
+        
+        print(f"  ✓ 创建了 {len(df)} 个时间戳")
+        print(f"  时间范围: {df['datetime'].min()} 至 {df['datetime'].max()}")
+        
+    elif 'MeasurementStartUTC' in df.columns:
+        df['datetime'] = pd.to_datetime(df['MeasurementStartUTC'])
+    else:
+        # 尝试其他可能的时间列
+        time_cols = [col for col in df.columns if 'measurementdate' in col.lower() or 'dateadjusted' in col.lower()]
+        if time_cols:
+            df['datetime'] = pd.to_datetime(df[time_cols[0]])
+        else:
+            raise ValueError(f"未找到时间列。可用列: {list(df.columns)[:20]}")
+    
+    # 处理无效时间戳
+    invalid_time = df['datetime'].isna().sum()
+    if invalid_time > 0:
+        print(f"  警告：{invalid_time} 条记录的时间戳无效，将被移除")
+        df = df[df['datetime'].notna()].copy()
+    
+    # 时间筛选
+    if month_start or month_end:
+        print(f"  时间筛选...")
         if month_start:
             df = df[df['datetime'] >= month_start]
         if month_end:
             df = df[df['datetime'] <= month_end]
         
         print(f"  筛选后剩余 {len(df)} 条记录")
-    else:
-        if 'MeasurementStartUTC' in df.columns:
-            df['datetime'] = pd.to_datetime(df['MeasurementStartUTC'])
-        else:
-            time_cols = [col for col in df.columns if 'time' in col.lower() or 'date' in col.lower()]
-            if time_cols:
-                df['datetime'] = pd.to_datetime(df[time_cols[0]])
     
     # 3. 获取路段参数
     print(f"\n[3/8] 获取路段参数...")
@@ -566,20 +585,68 @@ def build_finaldata(
             df_csv = pd.read_csv(snapshot_csv_path)
             
             # 创建时间戳用于对齐
-            if 'Local Date' in df_csv.columns and 'Local Time' in df_csv.columns:
+            # 注意：CSV文件的列名可能有前导空格，pandas读取时会自动处理
+            # 但我们需要找到正确的列名
+            
+            # 查找日期和时间列（处理可能的空格）
+            date_col = None
+            time_col = None
+            
+            for col in df_csv.columns:
+                col_clean = col.strip().lower()
+                if 'local date' in col_clean or ('date' in col_clean and 'time' not in col_clean):
+                    date_col = col
+                if 'local time' in col_clean or (col_clean == 'time' or ' time' in col.lower()):
+                    time_col = col
+            
+            if not date_col or not time_col:
+                # 如果没找到，尝试更宽松的匹配
+                for col in df_csv.columns:
+                    if 'date' in col.lower() and 'time' not in col.lower():
+                        date_col = col
+                    if 'time' in col.lower() and 'date' not in col.lower() and 'travel' not in col.lower():
+                        time_col = col
+            
+            if date_col and time_col:
+                # 清理数据中的空格
+                df_csv[date_col] = df_csv[date_col].astype(str).str.strip()
+                df_csv[time_col] = df_csv[time_col].astype(str).str.strip()
+                
+                # 组合日期和时间
                 df_csv['datetime_csv'] = pd.to_datetime(
-                    df_csv['Local Date'] + ' ' + df_csv['Local Time'],
-                    format='%Y-%m-%d %H:%M:%S'
+                    df_csv[date_col] + ' ' + df_csv[time_col],
+                    format='%Y-%m-%d %H:%M:%S',
+                    errors='coerce'
                 )
+                
+                # 检查是否有无效的时间戳
+                invalid_count = df_csv['datetime_csv'].isna().sum()
+                if invalid_count > 0:
+                    print(f"  警告：{invalid_count} 条记录的时间戳无效，将被忽略")
+                    df_csv = df_csv[df_csv['datetime_csv'].notna()].copy()
+                
+                if len(df_csv) == 0:
+                    raise ValueError("所有时间戳都无效")
             else:
-                raise ValueError("CSV文件缺少日期时间列")
+                raise ValueError(f"CSV文件缺少日期时间列。找到的列: {list(df_csv.columns)[:10]}")
             
             # 将秒级数据聚合到15分钟窗口
             # 方法：按15分钟窗口分组，计算每个窗口内Fused Travel Time的平均值
+            
+            # 查找Fused Travel Time列（可能有空格）
+            fused_tt_col = None
+            for col in df_csv.columns:
+                if 'Fused Travel Time' in col or ('fused' in col.lower() and 'travel' in col.lower() and 'time' in col.lower()):
+                    fused_tt_col = col
+                    break
+            
+            if not fused_tt_col:
+                raise ValueError(f"未找到Fused Travel Time列。可用列: {list(df_csv.columns)}")
+            
             df_csv['datetime_15min'] = df_csv['datetime_csv'].dt.floor('15min')
             
             # 聚合：计算每个15分钟窗口的平均Fused Travel Time
-            df_csv_agg = df_csv.groupby('datetime_15min')['Fused Travel Time'].mean().reset_index()
+            df_csv_agg = df_csv.groupby('datetime_15min')[fused_tt_col].mean().reset_index()
             df_csv_agg.columns = ['datetime_15min', 'fused_tt_15min_from_csv']
             
             print(f"  CSV数据聚合：{len(df_csv)} 条秒级记录 → {len(df_csv_agg)} 个15分钟窗口")
