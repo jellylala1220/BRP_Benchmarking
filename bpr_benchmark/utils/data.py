@@ -592,41 +592,43 @@ def build_finaldata(
             date_col = None
             time_col = None
             
+            # 精确匹配列名（CSV中列名可能有前导空格）
             for col in df_csv.columns:
-                col_clean = col.strip().lower()
-                if 'local date' in col_clean or ('date' in col_clean and 'time' not in col_clean):
+                col_stripped = col.strip()
+                if col_stripped == 'Local Date':
                     date_col = col
-                if 'local time' in col_clean or (col_clean == 'time' or ' time' in col.lower()):
+                if col_stripped == 'Local Time':
                     time_col = col
             
+            # 如果精确匹配失败，尝试宽松匹配
             if not date_col or not time_col:
-                # 如果没找到，尝试更宽松的匹配
                 for col in df_csv.columns:
-                    if 'date' in col.lower() and 'time' not in col.lower():
+                    col_lower = col.lower()
+                    if 'local date' in col_lower or (col_lower == 'date'):
                         date_col = col
-                    if 'time' in col.lower() and 'date' not in col.lower() and 'travel' not in col.lower():
+                    if 'local time' in col_lower and 'travel' not in col_lower:
                         time_col = col
             
             if date_col and time_col:
-                # 清理数据中的空格
-                df_csv[date_col] = df_csv[date_col].astype(str).str.strip()
-                df_csv[time_col] = df_csv[time_col].astype(str).str.strip()
-                
-                # 组合日期和时间
+                # CSV中的时间格式是 "2024-09-01" 和 "00:14:42"
+                # 直接组合即可
                 df_csv['datetime_csv'] = pd.to_datetime(
-                    df_csv[date_col] + ' ' + df_csv[time_col],
-                    format='%Y-%m-%d %H:%M:%S',
+                    df_csv[date_col].astype(str) + ' ' + df_csv[time_col].astype(str),
                     errors='coerce'
                 )
                 
                 # 检查是否有无效的时间戳
-                invalid_count = df_csv['datetime_csv'].isna().sum()
-                if invalid_count > 0:
-                    print(f"  警告：{invalid_count} 条记录的时间戳无效，将被忽略")
+                valid_count = df_csv['datetime_csv'].notna().sum()
+                total_count = len(df_csv)
+                
+                if valid_count == 0:
+                    raise ValueError("所有时间戳都无效")
+                
+                if valid_count < total_count:
+                    print(f"  警告：{total_count - valid_count} 条记录的时间戳无效，将被忽略")
                     df_csv = df_csv[df_csv['datetime_csv'].notna()].copy()
                 
-                if len(df_csv) == 0:
-                    raise ValueError("所有时间戳都无效")
+                print(f"  ✓ 成功创建 {len(df_csv)} 个CSV时间戳")
             else:
                 raise ValueError(f"CSV文件缺少日期时间列。找到的列: {list(df_csv.columns)[:10]}")
             
@@ -643,20 +645,22 @@ def build_finaldata(
             if not fused_tt_col:
                 raise ValueError(f"未找到Fused Travel Time列。可用列: {list(df_csv.columns)}")
             
+            # 将秒级时间戳向下取整到15分钟窗口
+            # 例如：00:14:42 → 00:00:00, 00:29:41 → 00:15:00
             df_csv['datetime_15min'] = df_csv['datetime_csv'].dt.floor('15min')
             
             # 聚合：计算每个15分钟窗口的平均Fused Travel Time
             df_csv_agg = df_csv.groupby('datetime_15min')[fused_tt_col].mean().reset_index()
             df_csv_agg.columns = ['datetime_15min', 'fused_tt_15min_from_csv']
             
-            print(f"  CSV数据聚合：{len(df_csv)} 条秒级记录 → {len(df_csv_agg)} 个15分钟窗口")
+            print(f"  ✓ CSV数据聚合：{len(df_csv)} 条秒级记录 → {len(df_csv_agg)} 个15分钟窗口")
+            print(f"  CSV时间范围: {df_csv_agg['datetime_15min'].min()} 至 {df_csv_agg['datetime_15min'].max()}")
+            print(f"  CSV Fused TT 范围: [{df_csv_agg['fused_tt_15min_from_csv'].min():.2f}, {df_csv_agg['fused_tt_15min_from_csv'].max():.2f}] 秒")
             
             # 对齐到Precleaned数据的15分钟时间戳
-            df_sorted = df.sort_values('datetime')
-            
-            # 使用merge进行精确匹配（15分钟窗口对齐）
+            # Precleaned的datetime已经是15分钟对齐的，直接merge即可
             df_merged = pd.merge(
-                df_sorted,
+                df,
                 df_csv_agg,
                 left_on='datetime',
                 right_on='datetime_15min',
