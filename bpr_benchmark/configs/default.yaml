@@ -27,39 +27,25 @@ models_to_run:
   - M0  # 支持方法: classical, loglinear, nls
   
   # M1: 动态参数BPR
-  # - M1  # 支持方法: classical, loglinear, nls
+  - M1  # 支持方法: classical, loglinear, nls
   
   # M2: 基本图VDF
-  # - M2  # 支持方法: tree, rf, gbdt
+  - M2  # 支持方法: tree, rf, gbdt
   
   # M3: 多类别BPR
-  # - M3  # 支持方法: classical, loglinear, nls
+  - M3  # 支持方法: classical, loglinear, nls
   
   # M4: 外部因素BPR
-  # - M4  # 支持方法: tree, rf, gbdt
+  - M4  # 支持方法: tree, rf, gbdt
   
   # M5: ML混合BPR
-  # - M5  # 支持方法: svr, tree, rf, gbdt, nn
+  - M5  # 支持方法: svr, tree, rf, gbdt, nn
   
   # M6: 可靠性BPR
-  # - M6  # 支持方法: bayes
+  - M6  # 支持方法: bayes
 
-# 估计方法配置
-methods_to_run:
-  # BPR参数估计方法
-  - classical      # 经典BPR (α=0.15, β=4.0)
-  - loglinear     # 对数线性回归
-  - nls           # 非线性最小二乘法
-  
-  # 机器学习方法（需要配合M5使用）
-  # - svr
-  # - tree
-  # - rf
-  # - gbdt
-  # - nn
-  
-  # 贝叶斯方法（需要配合M6使用）
-  # - bayes
+# 估计方法配置（留空表示使用每个模型兼容的所有方法）
+methods_to_run: []  # 空列表 = 自动使用所有兼容方法
 
 # 特征配置 (对应M1-M6的概念)
 features:

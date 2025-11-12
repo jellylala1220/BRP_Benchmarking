@@ -480,10 +480,13 @@ def main():
         
         all_results[road_name] = road_results
     
-    # 8. 生成总结报告
+    # 8. 生成总结报告和MAE矩阵
     print("\n" + "=" * 80)
     print("基准测试完成！")
     print("=" * 80)
+    
+    # 导入MAE矩阵创建函数
+    from create_mae_matrix import create_mae_matrix_from_results, create_all_metrics_matrices, print_mae_matrix
     
     for road_name, road_results in all_results.items():
         print(f"\n{road_name} 最佳模型:")
@@ -501,6 +504,31 @@ def main():
             print(f"  RMSE: {best_model[1]['RMSE']:.4f} 秒")
             print(f"  MAPE: {best_model[1]['MAPE']:.2f} %")
             print(f"  R²: {best_model[1]['R2']:.4f}")
+        
+        # 创建并打印MAE矩阵
+        print("\n" + "=" * 80)
+        print("完整对比矩阵 - 模型 × 方法")
+        print("=" * 80)
+        
+        mae_matrix = create_mae_matrix_from_results(road_results)
+        print_mae_matrix(mae_matrix)
+        
+        # 保存MAE矩阵
+        matrix_output_dir = Path(config.get('output', {}).get('dir', 'outputs'))
+        if not matrix_output_dir.is_absolute():
+            matrix_output_dir = Path(__file__).parent / matrix_output_dir
+        matrix_output_dir = matrix_output_dir / road_name
+        
+        mae_matrix_file = matrix_output_dir / f"{road_name}_mae_matrix.csv"
+        mae_matrix.to_csv(mae_matrix_file, encoding='utf-8-sig')
+        print(f"\n✓ MAE矩阵已保存到: {mae_matrix_file}")
+        
+        # 创建所有指标的矩阵
+        all_matrices = create_all_metrics_matrices(road_results)
+        for metric, matrix_df in all_matrices.items():
+            matrix_file = matrix_output_dir / f"{road_name}_{metric}_matrix.csv"
+            matrix_df.to_csv(matrix_file, encoding='utf-8-sig')
+            print(f"✓ {metric}矩阵已保存到: {matrix_file}")
     
     print(f"\n完成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("\n所有结果已保存到 outputs/ 目录")
