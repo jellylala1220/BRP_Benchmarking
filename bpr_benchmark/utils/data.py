@@ -639,6 +639,7 @@ def build_finaldata(
     
     # 重要：T0应该从fused_tt_15min中取最低百分位，而不是从速度计算
     # 这样可以反映真实车辆在完全畅通时的行驶时间
+    link_length_km = link_length_m / 1000  # 确保变量可用
     
     if t0_strategy == "min5pct":
         # 取最低5%的fused_tt_15min的均值
