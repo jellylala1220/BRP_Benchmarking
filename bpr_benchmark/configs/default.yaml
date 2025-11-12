@@ -1,0 +1,130 @@
+# BPR 基准测试配置文件
+# 这是实验的"控制面板"
+
+# 数据源配置
+data:
+  precleaned_file: "../Data/Precleaned_M67_Traffic_Data_September_2024.xlsx"
+  weather_file: null  # 未来添加天气数据
+  
+# 路段配置
+roads:
+  M67_115030402:
+    link_id: 115030402
+    link_name: "M67 westbound between J4 and J3"
+    length_km: 2.7138037  # 2713.8037m
+    capacity_vph: 6649  # vehicles per hour
+    description: "主要测试路段"
+
+# 要测试的路段列表
+roads_to_test:
+  - M67_115030402
+
+# 模型配置
+models_to_run:
+  # 组A: BPR参数估计方法
+  - ClassicalBPR      # 经典BPR (α=0.15, β=4.0)
+  - NLS_BPR          # 非线性最小二乘法
+  - LogLinearBPR     # 对数线性回归
+  
+  # 组B: 机器学习方法
+  - SVR              # 支持向量回归
+  - DecisionTree     # 决策树
+  - RandomForest     # 随机森林
+  - GradientBoosting # 梯度提升
+  - NeuralNetwork    # 神经网络
+  
+  # 组C: 可靠性/不确定性方法
+  - BayesianBPR      # 贝叶斯回归
+
+# 特征配置 (对应M1-M6的概念)
+features:
+  base:
+    - V_C_Ratio      # 流量容量比 (所有模型都用)
+    - t_0            # 自由流行程时间
+  
+  m1_dynamic:        # M1: 动态参数
+    - is_peak        # 是否高峰时段
+    - hour           # 小时
+    - is_weekday     # 是否工作日
+  
+  m3_multiclass:     # M3: 多类别 (HGV)
+    - p_H            # HGV份额
+  
+  m4_external:       # M4: 外部因素
+    - is_raining     # 是否下雨 (未来)
+    - temperature    # 温度 (未来)
+
+# 时段定义 (M1: 动态参数)
+time_periods:
+  morning_peak:
+    start: "07:00"
+    end: "09:00"
+  evening_peak:
+    start: "15:00"
+    end: "18:00"
+
+# 数据分割配置 (分块时间分割法)
+data_split:
+  method: "temporal_block"  # 时间分块
+  train_weeks: [1, 2, 3]    # 第1-3周训练
+  test_week: 4              # 第4周测试
+
+# 自由流速度估计配置
+free_flow:
+  method: "low_volume_median"  # 使用低流量时的中位数速度
+  volume_threshold: 500        # V < 500 vph 被认为是自由流
+
+# HGV 定义 (M3: 多类别)
+vehicle_categories:
+  light:
+    - Category1  # 汽车
+    - Category2  # 轻型货车
+  heavy:
+    - Category3  # 刚性HGV
+    - Category4  # 铰接式HGV
+
+# 模型超参数
+model_params:
+  RandomForest:
+    n_estimators: 100
+    max_depth: 10
+    random_state: 42
+  
+  GradientBoosting:
+    n_estimators: 100
+    learning_rate: 0.1
+    max_depth: 5
+    random_state: 42
+  
+  NeuralNetwork:
+    hidden_layer_sizes: [64, 32, 16]
+    max_iter: 1000
+    random_state: 42
+  
+  SVR:
+    kernel: 'rbf'
+    C: 1.0
+    epsilon: 0.1
+
+# 评估指标配置
+metrics:
+  primary:
+    - MAE    # 平均绝对误差
+    - RMSE   # 均方根误差
+    - MAPE   # 平均绝对百分比误差
+    - R2     # R平方
+  
+  stratified:  # 分层评估
+    by_vcr:    # 按V/C比分组
+      - [0.0, 0.3]    # 自由流
+      - [0.3, 0.7]    # 中等拥堵
+      - [0.7, 1.0]    # 高拥堵
+      - [1.0, 999]    # 超容量
+
+# 输出配置
+output:
+  dir: "../outputs"
+  save_predictions: true
+  save_plots: true
+  save_summary: true
+

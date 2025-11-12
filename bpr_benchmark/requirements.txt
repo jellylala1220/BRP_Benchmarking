@@ -1,0 +1,23 @@
+# BPR 基准测试框架依赖包
+
+# 核心数据处理
+pandas>=1.5.0
+numpy>=1.23.0
+openpyxl>=3.0.0  # Excel文件读取
+
+# 科学计算和优化
+scipy>=1.9.0
+
+# 机器学习
+scikit-learn>=1.2.0
+
+# 配置文件
+pyyaml>=6.0
+
+# 可视化（可选）
+matplotlib>=3.6.0
+seaborn>=0.12.0
+
+# 进度条（可选）
+tqdm>=4.64.0
+
