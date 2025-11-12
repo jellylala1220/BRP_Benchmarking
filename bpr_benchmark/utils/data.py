@@ -559,6 +559,7 @@ def build_finaldata(
     
     # Fused行程时间（Ground Truth）
     # 优先使用CSV文件中的"Fused Travel Time"（如果提供）
+    # 重要：CSV中的Fused Travel Time是秒级/分钟级的真实测量值，需要聚合到15分钟窗口
     if snapshot_csv_path and Path(snapshot_csv_path).exists():
         print(f"  从CSV文件读取Fused Travel Time: {snapshot_csv_path}")
         try:
@@ -573,39 +574,57 @@ def build_finaldata(
             else:
                 raise ValueError("CSV文件缺少日期时间列")
             
-            # 对齐时间戳（使用merge_asof进行最近邻匹配）
-            df_sorted = df.sort_values('datetime')
-            df_csv_sorted = df_csv.sort_values('datetime_csv')
+            # 将秒级数据聚合到15分钟窗口
+            # 方法：按15分钟窗口分组，计算每个窗口内Fused Travel Time的平均值
+            df_csv['datetime_15min'] = df_csv['datetime_csv'].dt.floor('15min')
             
-            df_merged = pd.merge_asof(
+            # 聚合：计算每个15分钟窗口的平均Fused Travel Time
+            df_csv_agg = df_csv.groupby('datetime_15min')['Fused Travel Time'].mean().reset_index()
+            df_csv_agg.columns = ['datetime_15min', 'fused_tt_15min_from_csv']
+            
+            print(f"  CSV数据聚合：{len(df_csv)} 条秒级记录 → {len(df_csv_agg)} 个15分钟窗口")
+            
+            # 对齐到Precleaned数据的15分钟时间戳
+            df_sorted = df.sort_values('datetime')
+            
+            # 使用merge进行精确匹配（15分钟窗口对齐）
+            df_merged = pd.merge(
                 df_sorted,
-                df_csv_sorted[['datetime_csv', 'Fused Travel Time']],
+                df_csv_agg,
                 left_on='datetime',
-                right_on='datetime_csv',
-                direction='nearest',
-                tolerance=pd.Timedelta(minutes=15)  # 允许15分钟内的匹配
+                right_on='datetime_15min',
+                how='left'
             )
             
-            # 使用CSV中的Fused Travel Time
-            df['fused_tt_15min'] = df_merged['Fused Travel Time'].values
+            # 使用CSV中聚合后的Fused Travel Time
+            df['fused_tt_15min'] = df_merged['fused_tt_15min_from_csv'].values
             
             # 检查匹配率
             matched = df['fused_tt_15min'].notna().sum()
             print(f"  ✓ 成功匹配 {matched}/{len(df)} 条记录 ({matched/len(df)*100:.1f}%)")
             
             # 如果匹配率太低，回退到计算值
-            if matched < len(df) * 0.8:
-                print(f"  警告：匹配率较低，部分使用计算值")
+            if matched < len(df) * 0.5:
+                print(f"  警告：匹配率较低 ({matched/len(df)*100:.1f}%)，使用计算值")
+                link_length_km = link_length_m / 1000
+                calculated_tt = (link_length_km / df['v_avg_kmh']) * 3600
+                df['fused_tt_15min'] = df['fused_tt_15min'].fillna(calculated_tt)
+            elif matched < len(df):
+                # 部分匹配：用计算值填充缺失值
+                print(f"  部分匹配：用计算值填充 {len(df) - matched} 个缺失值")
                 link_length_km = link_length_m / 1000
                 calculated_tt = (link_length_km / df['v_avg_kmh']) * 3600
                 df['fused_tt_15min'] = df['fused_tt_15min'].fillna(calculated_tt)
         except Exception as e:
             print(f"  警告：无法从CSV读取Fused Travel Time ({e})，使用计算值")
+            import traceback
+            traceback.print_exc()
             link_length_km = link_length_m / 1000
             df['fused_tt_15min'] = (link_length_km / df['v_avg_kmh']) * 3600
     else:
         # 如果没有提供CSV或CSV不存在，使用计算值
         print(f"  使用计算值（从速度和长度计算）")
+        print(f"  注意：建议提供snapshot_csv_path以使用真实的Fused Travel Time")
         link_length_km = link_length_m / 1000
         df['fused_tt_15min'] = (link_length_km / df['v_avg_kmh']) * 3600
     
@@ -618,25 +637,46 @@ def build_finaldata(
     # 6. 计算自由流行程时间
     print(f"\n[6/8] 计算自由流行程时间 (策略: {t0_strategy})...")
     
+    # 重要：T0应该从fused_tt_15min中取最低百分位，而不是从速度计算
+    # 这样可以反映真实车辆在完全畅通时的行驶时间
+    
     if t0_strategy == "min5pct":
-        # 使用最高5%速度
-        v_95 = df['v_avg_kmh'].quantile(0.95)
-        t0_ff = (link_length_km / v_95) * 3600
+        # 取最低5%的fused_tt_15min的均值
+        # 逻辑：凌晨或夜间车流极小时，此时的旅行时间可视为自由流条件
+        t0_ff = df['fused_tt_15min'].quantile(0.05)
+        # 或者使用最低5%的均值（更稳健）
+        t0_candidates = df['fused_tt_15min'].nsmallest(int(len(df) * 0.05))
+        t0_ff = t0_candidates.mean()
+        print(f"  使用最低5%的fused_tt_15min均值")
+    elif t0_strategy == "min10pct":
+        # 取最低10%的fused_tt_15min的均值
+        t0_candidates = df['fused_tt_15min'].nsmallest(int(len(df) * 0.10))
+        t0_ff = t0_candidates.mean()
+        print(f"  使用最低10%的fused_tt_15min均值")
     elif t0_strategy == "low_volume":
-        # 使用低流量时的中位数速度
+        # 使用低流量时的fused_tt_15min中位数
         low_vol_mask = df['flow_veh_hr'] < 500
-        if low_vol_mask.sum() > 0:
-            v_ff = df.loc[low_vol_mask, 'v_avg_kmh'].median()
-            t0_ff = (link_length_km / v_ff) * 3600
+        if low_vol_mask.sum() > 10:  # 至少需要10个样本
+            t0_ff = df.loc[low_vol_mask, 'fused_tt_15min'].median()
+            print(f"  使用低流量(<500 veh/hr)时的fused_tt_15min中位数")
         else:
-            v_95 = df['v_avg_kmh'].quantile(0.95)
-            t0_ff = (link_length_km / v_95) * 3600
+            # 回退到最低5%
+            t0_candidates = df['fused_tt_15min'].nsmallest(int(len(df) * 0.05))
+            t0_ff = t0_candidates.mean()
+            print(f"  低流量样本不足，使用最低5%的fused_tt_15min均值")
     else:
         raise ValueError(f"未知的t0策略: {t0_strategy}")
+    
+    # 确保T0合理（不能小于理论最小值）
+    theoretical_min = (link_length_km / 120) * 3600  # 假设最大速度120 km/h
+    if t0_ff < theoretical_min:
+        print(f"  警告：T0 ({t0_ff:.2f}秒) 小于理论最小值 ({theoretical_min:.2f}秒)，使用理论最小值")
+        t0_ff = theoretical_min
     
     df['t0_ff'] = t0_ff
     
     print(f"  自由流行程时间 t0: {t0_ff:.2f} 秒")
+    print(f"  最低5%范围: [{df['fused_tt_15min'].quantile(0.05):.2f}, {df['fused_tt_15min'].quantile(0.10):.2f}] 秒")
     
     # 7. Winsorize异常值
     print(f"\n[7/8] Winsorize异常值处理...")
