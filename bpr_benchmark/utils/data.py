@@ -623,7 +623,21 @@ def build_finaldata(
     n_valid = df['is_valid'].sum()
     print(f"  有效记录: {n_valid} / {len(df)} ({n_valid/len(df)*100:.2f}%)")
     
-    # 9. 选择最终列
+    # 9. 添加时段特征（如果还没有）
+    if 'is_peak' not in df.columns:
+        if 'hour' in df.columns:
+            df['is_peak'] = ((df['hour'] >= 7) & (df['hour'] < 9) |
+                            (df['hour'] >= 15) & (df['hour'] < 18)).astype(int)
+        else:
+            df['is_peak'] = 0
+    
+    # 添加外部因素（如果还没有）
+    if 'is_raining' not in df.columns:
+        df['is_raining'] = 0
+    if 'temperature' not in df.columns:
+        df['temperature'] = np.nan
+    
+    # 10. 选择最终列（标准FinalData格式）
     final_columns = [
         'datetime', 'LinkUID', 
         'flow_veh_hr', 'capacity', 'link_length_m',
@@ -632,10 +646,26 @@ def build_finaldata(
         'share_len_cat1', 'share_len_cat2', 'share_len_cat3', 'share_len_cat4',
         'hgv_share',
         'hour', 'weekday', 'daytype',
+        'is_peak',  # M1动态参数需要
+        'is_raining', 'temperature',  # M4外部因素需要
         'is_valid', 'flag_tt_outlier', 'fused_tt_15min_winsor'
     ]
     
-    df_final = df[final_columns].copy()
+    # 只选择存在的列
+    available_columns = [col for col in final_columns if col in df.columns]
+    df_final = df[available_columns].copy()
+    
+    # 检查缺失的列
+    missing_columns = [col for col in final_columns if col not in df.columns]
+    if missing_columns:
+        print(f"  警告：以下列缺失（将使用默认值）: {missing_columns}")
+        for col in missing_columns:
+            if col == 'is_peak':
+                df_final[col] = 0
+            elif col in ['is_raining', 'temperature']:
+                df_final[col] = 0 if col == 'is_raining' else np.nan
+            else:
+                df_final[col] = 0
     
     print(f"\n{'='*60}")
     print(f"✓ FinalData构建完成！")

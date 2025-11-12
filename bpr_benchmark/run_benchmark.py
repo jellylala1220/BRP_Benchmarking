@@ -27,7 +27,7 @@ warnings.filterwarnings('ignore')
 # 添加项目路径
 sys.path.append(str(Path(__file__).parent))
 
-from utils.data import load_and_preprocess, split_data
+from utils.data import build_finaldata
 from utils.metrics import (
     calculate_all_metrics,
     calculate_stratified_metrics,
@@ -36,7 +36,8 @@ from utils.metrics import (
     generate_evaluation_report,
     print_metrics_summary
 )
-from models.base import create_model
+from pipelines.registry import create_model, get_compatible_methods
+from pipelines.train_eval import run_benchmark as run_benchmark_new
 
 
 def load_config(config_path: str = "configs/default.yaml") -> dict:
@@ -46,17 +47,16 @@ def load_config(config_path: str = "configs/default.yaml") -> dict:
 
 
 def run_single_model(model_name: str, config: dict, df_train: pd.DataFrame, 
-                     df_test: pd.DataFrame, t_0: float, capacity: float) -> dict:
+                     df_test: pd.DataFrame, method: str = None) -> dict:
     """
-    运行单个模型的训练和评估
+    运行单个模型的训练和评估（新架构）
     
     Args:
-        model_name: 模型名称
+        model_name: 模型名称 (如 'M0')
         config: 配置字典
-        df_train: 训练数据
-        df_test: 测试数据
-        t_0: 自由流行程时间
-        capacity: 路段容量
+        df_train: 训练数据（FinalData格式）
+        df_test: 测试数据（FinalData格式）
+        method: 估计方法（如果为None，使用默认方法）
         
     Returns:
         包含评估结果的字典
@@ -64,33 +64,43 @@ def run_single_model(model_name: str, config: dict, df_train: pd.DataFrame,
     
     print(f"\n{'='*60}")
     print(f"运行模型: {model_name}")
+    if method:
+        print(f"  方法: {method}")
     print(f"{'='*60}")
     
     try:
-        # 创建模型实例
-        model = create_model(model_name, config, t_0, capacity)
+        # 获取兼容的方法
+        if method is None:
+            compatible_methods = get_compatible_methods(model_name)
+            if compatible_methods:
+                method = compatible_methods[0]  # 使用第一个兼容方法
+            else:
+                raise ValueError(f"模型 {model_name} 没有兼容的估计方法")
         
-        # 训练模型
+        # 创建模型实例（新架构）
+        model = create_model(model_name, config)
+        
+        # 训练模型（新架构：使用method参数）
         print("训练中...")
-        model.fit(df_train)
+        model.fit(df_train, method=method)
         
-        # 获取模型参数
-        params = model.get_params()
-        print(f"模型参数: {params}")
+        # 获取模型信息
+        model_info = model.info()
+        print(f"模型信息: {model_info}")
         
         # 预测
         print("预测中...")
         y_pred = model.predict(df_test)
-        y_true = df_test['t_ground_truth'].values
+        y_true = df_test['fused_tt_15min'].values  # 使用FinalData列名
         
         # 评估 - 总体指标
         print("评估中...")
         overall_metrics = calculate_all_metrics(y_true, y_pred)
-        print_metrics_summary(overall_metrics, model_name)
+        print_metrics_summary(overall_metrics, f"{model_name}_{method}")
         
         # 评估 - 分层指标（按V/C比）
-        vcr = df_test['V_C_Ratio'].values
-        vcr_bins = config['metrics']['stratified']['by_vcr']
+        vcr = df_test['v_over_c'].values  # 使用FinalData列名
+        vcr_bins = config.get('builder', {}).get('vc_bins', [0, 0.6, 0.85, 1.0, 9])
         stratified_metrics = calculate_stratified_metrics(y_true, y_pred, vcr, vcr_bins)
         
         print("\n分层评估（按V/C比）:")
@@ -109,25 +119,27 @@ def run_single_model(model_name: str, config: dict, df_train: pd.DataFrame,
         # 返回结果
         result = {
             'model_name': model_name,
+            'method': method,
             'overall': overall_metrics,
             'stratified': stratified_metrics,
             'by_period': period_metrics,
-            'params': params,
+            'model_info': model_info,
             'predictions': y_pred,
             'success': True
         }
         
-        print(f"\n✓ {model_name} 完成！")
+        print(f"\n✓ {model_name} ({method}) 完成！")
         
         return result
         
     except Exception as e:
-        print(f"\n✗ {model_name} 失败: {e}")
+        print(f"\n✗ {model_name} ({method}) 失败: {e}")
         import traceback
         traceback.print_exc()
         
         return {
             'model_name': model_name,
+            'method': method,
             'success': False,
             'error': str(e)
         }
@@ -198,8 +210,8 @@ def create_visualizations(results: dict, df_test: pd.DataFrame,
         plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei', 'DejaVu Sans']
         plt.rcParams['axes.unicode_minus'] = False
         
-        y_true = df_test['t_ground_truth'].values
-        vcr = df_test['V_C_Ratio'].values
+        y_true = df_test['fused_tt_15min'].values  # 使用FinalData列名
+        vcr = df_test['v_over_c'].values  # 使用FinalData列名
         
         # 1. 预测 vs 真实值散点图
         fig, axes = plt.subplots(3, 3, figsize=(18, 18))
@@ -318,9 +330,32 @@ def main():
     print(f"  - 测试路段: {config['roads_to_test']}")
     print(f"  - 测试模型: {config['models_to_run']}")
     
-    # 2. 加载和预处理数据
-    print("\n步骤 2: 加载和预处理数据...")
-    all_data = load_and_preprocess("configs/default.yaml")
+    # 2. 加载和预处理数据（使用新架构）
+    print("\n步骤 2: 构建FinalData...")
+    
+    # 使用新的build_finaldata函数
+    all_data = {}
+    for road_name in config['roads_to_test']:
+        road_info = config['roads'][road_name]
+        link_id = road_info['link_id']
+        capacity = road_info['capacity_vph']
+        link_length_m = road_info['link_length_m']
+        
+        print(f"\n处理路段: {road_name} (LinkID: {link_id})")
+        
+        # 构建FinalData
+        df_final = build_finaldata(
+            link_id=link_id,
+            precleaned_path=config['data']['precleaned_file'],
+            capacity=capacity,
+            link_length_m=link_length_m,
+            month_start=config.get('data', {}).get('month_start'),
+            month_end=config.get('data', {}).get('month_end'),
+            t0_strategy=config.get('builder', {}).get('t0_strategy', 'min5pct'),
+            winsor=tuple(config.get('builder', {}).get('winsor', [0.01, 0.99]))
+        )
+        
+        all_data[road_name] = df_final
     
     # 3. 循环遍历每条路段
     all_results = {}
@@ -333,56 +368,78 @@ def main():
         # 获取该路段的数据
         df_final = all_data[road_name]
         
-        # 分割训练/测试集
+        # 分割训练/测试集（按时间）
         print("\n步骤 3: 分割训练/测试集...")
-        df_train, df_test = split_data(df_final, config)
+        train_end = config.get('train', {}).get('split', {}).get('train_end', None)
+        if train_end:
+            df_train = df_final[df_final['datetime'] <= train_end].copy()
+            df_test = df_final[df_final['datetime'] > train_end].copy()
+        else:
+            # 默认：80%训练，20%测试
+            split_idx = int(len(df_final) * 0.8)
+            df_train = df_final.iloc[:split_idx].copy()
+            df_test = df_final.iloc[split_idx:].copy()
         
-        # 获取路段参数
-        road_info = config['roads'][road_name]
-        capacity = road_info['capacity_vph']
-        t_0 = df_train['t_0'].iloc[0]
+        print(f"  训练集: {len(df_train)} 条")
+        print(f"  测试集: {len(df_test)} 条")
+        
+        # 获取路段参数（从FinalData中）
+        capacity = df_train['capacity'].iloc[0]
+        t0_ff = df_train['t0_ff'].iloc[0]
         
         print(f"\n路段参数:")
         print(f"  - 容量: {capacity} vph")
-        print(f"  - 自由流行程时间: {t_0:.2f} 秒")
+        print(f"  - 自由流行程时间: {t0_ff:.2f} 秒")
         
-        # 4. 循环遍历每个模型
+        # 4. 循环遍历每个模型和方法组合
         print("\n步骤 4: 训练和评估模型...")
         
         road_results = {}
+        models_to_run = config.get('models', config.get('models_to_run', []))
+        methods_to_run = config.get('methods', [])
         
-        for model_name in config['models_to_run']:
-            result = run_single_model(
-                model_name=model_name,
-                config=config,
-                df_train=df_train,
-                df_test=df_test,
-                t_0=t_0,
-                capacity=capacity
-            )
+        for model_name in models_to_run:
+            # 获取兼容的方法
+            compatible_methods = get_compatible_methods(model_name)
+            if not compatible_methods:
+                print(f"  跳过 {model_name}：无兼容方法")
+                continue
             
-            road_results[model_name] = result
+            # 如果指定了方法列表，只使用兼容的方法
+            if methods_to_run:
+                compatible_methods = [m for m in compatible_methods if m in methods_to_run]
+            
+            for method in compatible_methods:
+                result = run_single_model(
+                    model_name=model_name,
+                    config=config,
+                    df_train=df_train,
+                    df_test=df_test,
+                    method=method
+                )
+                
+                road_results[f"{model_name}_{method}"] = result
         
         # 5. 保存结果
         print("\n步骤 5: 保存结果...")
-        output_dir = Path(config['output']['dir']) / road_name
+        output_dir = Path(config.get('output', {}).get('dir', 'outputs')) / road_name
         
-        if config['output']['save_summary']:
+        if config.get('output', {}).get('save_summary', True):
             save_results(road_results, output_dir, road_name)
         
         # 6. 创建可视化
-        if config['output']['save_plots']:
+        if config.get('output', {}).get('save_plots', False):
             print("\n步骤 6: 创建可视化...")
             create_visualizations(road_results, df_test, output_dir, road_name)
         
         # 7. 保存预测结果（可选）
-        if config['output']['save_predictions']:
+        if config.get('output', {}).get('save_predictions', False):
             print("\n步骤 7: 保存预测结果...")
-            predictions_df = df_test[['timestamp', 't_ground_truth', 'V_C_Ratio']].copy()
+            predictions_df = df_test[['datetime', 'fused_tt_15min', 'v_over_c']].copy()  # 使用FinalData列名
             
-            for model_name, res in road_results.items():
+            for model_method, res in road_results.items():
                 if res['success']:
-                    predictions_df[f'{model_name}_pred'] = res['predictions']
+                    predictions_df[f'{model_method}_pred'] = res['predictions']
             
             pred_file = output_dir / f"{road_name}_predictions.csv"
             predictions_df.to_csv(pred_file, index=False, encoding='utf-8-sig')
