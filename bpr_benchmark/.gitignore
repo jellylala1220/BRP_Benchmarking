@@ -36,7 +36,7 @@ wheels/
 outputs/
 *.csv
 *.png
-*.txt
+# *.txt  # 注释掉，允许文档txt文件
 !requirements.txt
 !README.md
 
