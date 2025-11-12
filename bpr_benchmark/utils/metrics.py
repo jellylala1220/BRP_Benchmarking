@@ -127,7 +127,9 @@ def calculate_stratified_metrics(
         y_true: 真实值
         y_pred: 预测值
         vcr: V/C比值
-        vcr_bins: V/C比分组区间，默认为 [(0, 0.3), (0.3, 0.7), (0.7, 1.0), (1.0, 999)]
+        vcr_bins: V/C比分组区间，可以是：
+                  - 列表of列表/元组: [(0, 0.3), (0.3, 0.7), ...]
+                  - 边界列表: [0, 0.3, 0.7, 1.0, 999] (将被转换为区间)
         
     Returns:
         包含各层指标的DataFrame
@@ -135,6 +137,11 @@ def calculate_stratified_metrics(
     
     if vcr_bins is None:
         vcr_bins = [(0.0, 0.3), (0.3, 0.7), (0.7, 1.0), (1.0, 999)]
+    elif isinstance(vcr_bins, list) and len(vcr_bins) > 0:
+        # 检查是边界列表还是区间列表
+        if not isinstance(vcr_bins[0], (tuple, list)):
+            # 边界列表 [0, 0.3, 0.7, ...] -> 转换为区间列表
+            vcr_bins = [(vcr_bins[i], vcr_bins[i+1]) for i in range(len(vcr_bins)-1)]
     
     results = []
     
@@ -313,9 +320,19 @@ def generate_evaluation_report(
     report_lines.append("1. 模型性能对比")
     report_lines.append("-" * 80)
     
-    comparison_df = create_metrics_comparison_table(
-        {name: res['overall'] for name, res in results_dict.items()}
-    )
+    # 只使用成功的结果
+    success_results = {
+        name: res['overall'] 
+        for name, res in results_dict.items() 
+        if 'overall' in res
+    }
+    
+    if not success_results:
+        report_lines.append("没有成功的模型结果")
+        report_lines.append("")
+        return "\n".join(report_lines)
+    
+    comparison_df = create_metrics_comparison_table(success_results)
     report_lines.append(comparison_df.to_string(index=False))
     report_lines.append("")
     

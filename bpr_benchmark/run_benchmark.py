@@ -42,7 +42,9 @@ from pipelines.train_eval import run_benchmark as run_benchmark_new
 
 def load_config(config_path: str = "configs/default.yaml") -> dict:
     """加载配置文件"""
-    with open(config_path, 'r', encoding='utf-8') as f:
+    # 确保配置文件路径相对于脚本目录
+    config_file = Path(__file__).parent / config_path
+    with open(config_file, 'r', encoding='utf-8') as f:
         return yaml.safe_load(f)
 
 
@@ -170,12 +172,21 @@ def save_results(results: dict, output_dir: Path, road_name: str):
         comparison_df.to_csv(comparison_file, index=False, encoding='utf-8-sig')
         print(f"\n保存对比表到: {comparison_file}")
     
-    # 2. 保存详细报告
-    report_text = generate_evaluation_report(results, output_path=None)
-    report_file = output_dir / f"{road_name}_report.txt"
-    with open(report_file, 'w', encoding='utf-8') as f:
-        f.write(report_text)
-    print(f"保存评估报告到: {report_file}")
+    # 2. 保存详细报告（只传入成功的结果）
+    success_results = {
+        name: res 
+        for name, res in results.items() 
+        if res.get('success', False)
+    }
+    
+    if success_results:
+        report_text = generate_evaluation_report(success_results, output_path=None)
+        report_file = output_dir / f"{road_name}_report.txt"
+        with open(report_file, 'w', encoding='utf-8') as f:
+            f.write(report_text)
+        print(f"保存评估报告到: {report_file}")
+    else:
+        print("警告：没有成功的模型结果，跳过报告生成")
     
     # 3. 保存每个模型的分层结果
     for model_name, res in results.items():
@@ -210,16 +221,33 @@ def create_visualizations(results: dict, df_test: pd.DataFrame,
         plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei', 'DejaVu Sans']
         plt.rcParams['axes.unicode_minus'] = False
         
+        # 只使用成功的结果
+        success_results = {
+            name: res 
+            for name, res in results.items() 
+            if res.get('success', False) and 'predictions' in res
+        }
+        
+        if not success_results:
+            print("警告：没有成功的模型结果，跳过可视化")
+            return
+        
         y_true = df_test['fused_tt_15min'].values  # 使用FinalData列名
         vcr = df_test['v_over_c'].values  # 使用FinalData列名
         
         # 1. 预测 vs 真实值散点图
-        fig, axes = plt.subplots(3, 3, figsize=(18, 18))
+        n_models = len(success_results)
+        n_cols = min(3, n_models)
+        n_rows = (n_models + n_cols - 1) // n_cols
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(6*n_cols, 6*n_rows))
+        if n_models == 1:
+            axes = np.array([axes])
         axes = axes.flatten()
         
-        for idx, (model_name, res) in enumerate(results.items()):
-            if not res['success'] or idx >= 9:
-                continue
+        for idx, (model_name, res) in enumerate(success_results.items()):
+            if idx >= len(axes):
+                break
             
             ax = axes[idx]
             y_pred = res['predictions']
@@ -236,7 +264,7 @@ def create_visualizations(results: dict, df_test: pd.DataFrame,
             ax.grid(True, alpha=0.3)
         
         # 隐藏多余的子图
-        for idx in range(len(results), 9):
+        for idx in range(len(success_results), len(axes)):
             axes[idx].axis('off')
         
         plt.tight_layout()
@@ -248,8 +276,7 @@ def create_visualizations(results: dict, df_test: pd.DataFrame,
         # 2. 模型对比柱状图
         comparison_data = {
             name: res['overall'] 
-            for name, res in results.items() 
-            if res['success']
+            for name, res in success_results.items()
         }
         
         if comparison_data:
@@ -299,7 +326,7 @@ def create_visualizations(results: dict, df_test: pd.DataFrame,
             ax.grid(True, alpha=0.3)
         
         # 隐藏多余的子图
-        for idx in range(len(results), 9):
+        for idx in range(len(success_results), len(axes)):
             axes[idx].axis('off')
         
         plt.tight_layout()
