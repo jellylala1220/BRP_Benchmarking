@@ -118,13 +118,12 @@ class TrafficDataLoader:
         # --- Daytype ---
         # 0-4: Mon-Fri, 5: Sat, 6: Sun
         df['day_of_week'] = df['timestamp'].dt.dayofweek
-        # Simple mapping for now (can be expanded for holidays)
-        df['daytype'] = df['day_of_week'] 
+        df['daytype'] = df['day_of_week']
+        df['is_weekend'] = df['daytype'].isin([5, 6]).astype(int)
         
         # --- Weather ---
         # Assuming columns: 'precip', 'windspeed', 'visibility', 'conditions'
         # Map from provided data columns (need to verify exact names)
-        # Common names in weather data: 'precip', 'windspeed', 'visibility'
         
         if 'precip' in df.columns:
             df['R_t'] = pd.to_numeric(df['precip'], errors='coerce').fillna(0)

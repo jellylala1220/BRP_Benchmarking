@@ -12,69 +12,73 @@ class E1_SVR(BaseVDF):
     """
     def __init__(self):
         super().__init__("E1_SVR")
-        self.model = SVR(kernel='rbf', C=10.0, epsilon=0.1)
+        self.model = SVR(kernel='rbf', C=100, epsilon=0.1)
         self.scaler = StandardScaler()
+        # Unified features
+        self.features = ['VOC_t', 'HGV_share', 'tod_sin', 'tod_cos', 'is_weekend', 'Rain_t', 'LowVis_t']
         
-    def _get_features(self, df: pd.DataFrame) -> np.ndarray:
-        # x_t = [VOC, VOC^2, HGV, tod_sin, tod_cos, is_weekend, Rain, HeavyRain, LowVis]
-        voc = df['VOC_t'].values
-        hgv = df['HGV_share'].values
-        tod_sin = df['tod_sin'].values
-        tod_cos = df['tod_cos'].values
-        is_weekend = df['daytype'].isin([5, 6]).astype(int).values
-        rain = df['Rain_t'].values
+    def _prepare_X(self, df: pd.DataFrame, fit_scaler=False):
+        # Ensure features exist
+        if 'is_weekend' not in df.columns and 'daytype' in df.columns:
+            df['is_weekend'] = df['daytype'].isin([5, 6]).astype(int)
+            
+        # Add VOC^2
+        df['VOC_sq'] = df['VOC_t'] ** 2
         
-        X = np.column_stack([
-            voc, np.power(voc, 2), hgv, 
-            tod_sin, tod_cos, is_weekend, rain
-        ])
+        # Full feature list for X
+        # Note: VOC_sq is added dynamically
+        cols = self.features + ['VOC_sq']
+        
+        X = df[cols].values
+        
+        if fit_scaler:
+            X = self.scaler.fit_transform(X)
+        else:
+            X = self.scaler.transform(X)
+            
         return X
-        
-    def fit(self, df_train: pd.DataFrame) -> 'E1_SVR':
-        X = self._get_features(df_train)
+
+    def fit(self, df_train: pd.DataFrame):
+        X = self._prepare_X(df_train, fit_scaler=True)
         y = df_train['T_obs'].values
-        
-        X_scaled = self.scaler.fit_transform(X)
-        self.model.fit(X_scaled, y)
+        self.model.fit(X, y)
         self.is_fitted = True
         return self
-        
+
     def predict(self, df_test: pd.DataFrame) -> np.ndarray:
-        X = self._get_features(df_test)
-        X_scaled = self.scaler.transform(X)
-        return self.model.predict(X_scaled)
+        X = self._prepare_X(df_test, fit_scaler=False)
+        return self.model.predict(X)
 
 
 class E2_RF(BaseVDF):
     """
     E2: Random Forest
+    Uses same unified features.
     """
     def __init__(self):
         super().__init__("E2_RF")
         self.model = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
+        # Unified features
+        self.features = ['VOC_t', 'HGV_share', 'tod_sin', 'tod_cos', 'is_weekend', 'Rain_t', 'LowVis_t']
         
-    def _get_features(self, df: pd.DataFrame) -> np.ndarray:
-        # Same features as E1
-        voc = df['VOC_t'].values
-        hgv = df['HGV_share'].values
-        tod_sin = df['tod_sin'].values
-        tod_cos = df['tod_cos'].values
-        is_weekend = df['daytype'].isin([5, 6]).astype(int).values
-        rain = df['Rain_t'].values
+    def _prepare_X(self, df: pd.DataFrame):
+        # Ensure features exist
+        if 'is_weekend' not in df.columns and 'daytype' in df.columns:
+            df['is_weekend'] = df['daytype'].isin([5, 6]).astype(int)
+            
+        # Add VOC^2
+        df['VOC_sq'] = df['VOC_t'] ** 2
         
-        X = np.column_stack([
-            voc, np.power(voc, 2), hgv, 
-            tod_sin, tod_cos, is_weekend, rain
-        ])
-        return X
-        
-    def fit(self, df_train: pd.DataFrame) -> 'E2_RF':
-        X = self._get_features(df_train)
+        cols = self.features + ['VOC_sq']
+        return df[cols].values
+
+    def fit(self, df_train: pd.DataFrame):
+        X = self._prepare_X(df_train)
         y = df_train['T_obs'].values
         self.model.fit(X, y)
         self.is_fitted = True
         return self
-        
+
     def predict(self, df_test: pd.DataFrame) -> np.ndarray:
-        X = self._get_features(df_test)
+        X = self._prepare_X(df_test)
         return self.model.predict(X)
