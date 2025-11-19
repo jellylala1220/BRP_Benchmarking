@@ -37,30 +37,44 @@ def main():
     
     # 4. Run Benchmark
     print("\nStarting Benchmark...")
-    print(f"{'Model':<20} | {'Status':<10} | {'RMSE':<8} | {'MAE':<8} | {'R2':<8}")
-    print("-" * 70)
+    print(f"{'Model':<20} | {'Status':<10} | {'Train MAE':<10} | {'Test MAE':<10} | {'Test R2':<8}")
+    print("-" * 80)
     
     for model in models:
         try:
             # Train
             model.fit(train_df)
             
-            # Predict
+            # Evaluate on Train
+            y_train_pred = model.predict(train_df)
+            y_train_true = train_df['T_obs'].values
+            train_metrics = calculate_metrics(y_train_true, y_train_pred, f"{model.name} (Train)")
+            
+            # Evaluate on Test
             y_pred = model.predict(test_df)
             y_true = test_df['T_obs'].values
-            
-            # Metrics
-            metrics = calculate_metrics(y_true, y_pred, model.name)
+            test_metrics = calculate_metrics(y_true, y_pred, f"{model.name} (Test)")
             
             # Log
-            print(f"{model.name:<20} | {'Done':<10} | {metrics['RMSE']:.2f}     | {metrics['MAE']:.2f}     | {metrics['R2']:.2f}")
+            print(f"{model.name:<20} | {'Done':<10} | {train_metrics['MAE']:.2f}       | {test_metrics['MAE']:.2f}       | {test_metrics['R2']:.2f}")
             
             # Store result
             res_entry = {
-                "Cluster": model.name[0], # First letter A, B, C...
+                "Cluster": model.name[0],
                 "Model": model.name,
                 "Params": str(model.get_params()),
-                **metrics
+                # Train Metrics
+                "Train_RMSE": train_metrics['RMSE'],
+                "Train_MAE": train_metrics['MAE'],
+                "Train_MAPE": train_metrics['MAPE'],
+                "Train_R2": train_metrics['R2'],
+                "Train_P95": train_metrics['P95'],
+                # Test Metrics
+                "Test_RMSE": test_metrics['RMSE'],
+                "Test_MAE": test_metrics['MAE'],
+                "Test_MAPE": test_metrics['MAPE'],
+                "Test_R2": test_metrics['R2'],
+                "Test_P95": test_metrics['P95']
             }
             results.append(res_entry)
             
@@ -81,7 +95,7 @@ def main():
         f.write("# BPR Benchmark Report\n\n")
         f.write(f"**Date Range**: {train_df['timestamp'].min()} to {test_df['timestamp'].max()}\n")
         f.write(f"**Train Size**: {len(train_df)}, **Test Size**: {len(test_df)}\n\n")
-        f.write("## Model Performance\n\n")
+        f.write("## Model Performance (Train vs Test)\n\n")
         f.write(results_df.to_string(index=False))
         
     print(f"Report generated at {summary_path}")
