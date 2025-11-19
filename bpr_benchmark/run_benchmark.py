@@ -40,18 +40,40 @@ def main():
     print(f"{'Model':<20} | {'Status':<10} | {'Train MAE':<10} | {'Test MAE':<10} | {'Test R2':<8}")
     print("-" * 80)
     
+    # CRITICAL: Pre-train A1 for Cluster E residual models
+    print("\n[Pre-training A1 baseline for Cluster E...]")
+    A1 = A1_Calibrated()
+    A1.fit(train_df)
+    T_A1_train = A1.predict(train_df)
+    T_A1_test = A1.predict(test_df)
+    print(f"[A1 baseline ready: Train MAE = {np.mean(np.abs(train_df['T_obs'].values - T_A1_train)):.2f}]\n")
+    
     for model in models:
         try:
+            # Check if this is aCLUSTER E model (requires A1 predictions)
+            is_cluster_e = model.name.startswith('E')
+            
             # Train
-            model.fit(train_df)
+            if is_cluster_e:
+                model.fit(train_df, T_A1_train)
+            else:
+                model.fit(train_df)
             
             # Evaluate on Train
-            y_train_pred = model.predict(train_df)
+            if is_cluster_e:
+                y_train_pred = model.predict(train_df, T_A1_train)
+            else:
+                y_train_pred = model.predict(train_df)
+                
             y_train_true = train_df['T_obs'].values
             train_metrics = calculate_metrics(y_train_true, y_train_pred, f"{model.name} (Train)")
             
             # Evaluate on Test
-            y_pred = model.predict(test_df)
+            if is_cluster_e:
+                y_pred = model.predict(test_df, T_A1_test)
+            else:
+                y_pred = model.predict(test_df)
+                
             y_true = test_df['T_obs'].values
             test_metrics = calculate_metrics(y_true, y_pred, f"{model.name} (Test)")
             
@@ -94,7 +116,8 @@ def main():
     with open(summary_path, "w") as f:
         f.write("# BPR Benchmark Report\n\n")
         f.write(f"**Date Range**: {train_df['timestamp'].min()} to {test_df['timestamp'].max()}\n")
-        f.write(f"**Train Size**: {len(train_df)}, **Test Size**: {len(test_df)}\n\n")
+        f.write(f"**Train Set**: {len(train_df)} records (Sept 1-23, 2024)\n")
+        f.write(f"**Test Set**: {len(test_df)} records (Sept 24-30, 2024 - Last 7 days)\n\n")
         f.write("## Model Performance (Train vs Test)\n\n")
         f.write(results_df.to_string(index=False))
         

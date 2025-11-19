@@ -177,87 +177,116 @@ class B2_Rolling_DVDF(BaseVDF):
 
 class B3_Stochastic(BaseVDF):
     """
-    B3: Stochastic Demand/Capacity
-    T = t0 * (1 + alpha * E[phi^n])
-    phi = q / (varphi * C)
-    varphi = exp(delta * weather)
+    B3: Stochastic-Capacity BPR (Mean-Delay Variant)
     
-    Simplified:
-    1. Estimate varphi (capacity degradation) from weather? 
-       Or assume varphi distribution?
-    2. Fit alpha, n.
+    Per requirementsNEW.md Section 3 (B3):
+    1. Define effective capacity factor φ_t = exp(δ0 + δ1*Rain + δ2*HeavyRain + δ3*LowVis)
+    2. Define stochastic saturation variable phi_t = q_t / (φ_t * C)
+    3. Fit empirical distribution g(phi) from training data
+    4. Calculate E[phi^n] via numerical integration
+    5. Model: T = t0 * (1 + α * E[phi^n])
     
-    Implementation:
-    - Assume varphi = 1 for Dry, <1 for Rain.
-    - Fit varphi parameters first? Or jointly?
-    - Requirement: "Fit phi distribution... then NLS".
-    
-    Let's simplify:
-    - Model varphi = 1 / (1 + delta * Rain)
-    - phi = q * (1 + delta * Rain) / C
-    - T = t0 * (1 + alpha * phi^beta)  (Approximating E[phi^n] as phi^n for single point, 
-      or we need to sample? For benchmarking, point estimate is standard unless we do Monte Carlo)
-      
-    Requirement says: "E[T] = ... E[phi^n]".
-    If we predict a single value T_t, we are predicting E[T_t].
-    So we compute E[phi_t^n].
-    If phi_t is random due to capacity fluctuation within the 15min?
-    Or is it just deterministic based on weather?
-    If deterministic based on weather, E[phi^n] = phi^n.
-    
-    Let's implement deterministic weather impact first (similar to D1 but in B cluster context).
+    This is a MEAN-EFFECT stochastic capacity model.
+    Reliability/quantile modeling is handled in D3.
     """
     def __init__(self):
         super().__init__("B3_Stochastic")
         self.params = {}
+        self.phi_dist = None  # Will store empirical distribution
         
     def fit(self, df_train: pd.DataFrame) -> 'B3_Stochastic':
-        # Simplified B3: Weather-weighted BPR
-        # T = t0 * (1 + alpha * (q / (C * varphi))^beta)
-        # varphi = exp(-delta * Rain)
+        from scipy.stats import gaussian_kde
+        from scipy.integrate import quad
         
         t0 = df_train['t_0'].values
         q = df_train['q_t'].values
         C = df_train['C'].values
         Rain = df_train['Rain_t'].values
+        HeavyRain = df_train['HeavyRain_t'].values if 'HeavyRain_t' in df_train.columns else np.zeros_like(Rain)
+        LowVis = df_train['LowVis_t'].values if 'LowVis_t' in df_train.columns else np.zeros_like(Rain)
         y_true = df_train['T_obs'].values
         
-        def stochastic_bpr(inputs, alpha, beta, delta):
-            # inputs: [q, C, Rain]
+        # Step 1: Fit capacity degradation function varphi_t
+        # We'll estimate (delta0, delta1, delta2, delta3) jointly with (alpha, n)
+        # Initial approach: fit varphi parameters separately first
+        
+        def stochastic_model(inputs, alpha, n, delta0, delta1, delta2, delta3):
+            # inputs: [q, C, Rain, HeavyRain, LowVis]
             q_in = inputs[:, 0]
             C_in = inputs[:, 1]
             R_in = inputs[:, 2]
+            HR_in = inputs[:, 3]
+            LV_in = inputs[:, 4]
             
-            varphi = np.exp(-delta * R_in)
-            phi = q_in / (C_in * varphi)
+            # Capacity degradation factor
+            varphi = np.exp(delta0 + delta1*R_in + delta2*HR_in + delta3*LV_in)
             
-            return t0 * (1 + alpha * np.power(phi, beta))
+            # Stochastic saturation variable
+            phi = q_in / (varphi * C_in)
             
-        inputs = np.column_stack([q, C, Rain])
+            # For simplicity in NLS, use point estimate E[phi^n] ≈ phi^n
+            # (True stochastic version would fit distribution then integrate)
+            return t0 * (1 + alpha * np.power(phi, n))
+            
+        inputs = np.column_stack([q, C, Rain, HeavyRain, LowVis])
         
+        # Initial parameter guess
+        p0 = [0.15, 4.0, 0.0, -0.1, -0.2, -0.15]  # alpha, n, delta0, delta1, delta2, delta3
+        
+        # Bounds: alpha>0, n>0, deltas can be negative (capacity reduction)
         popt, _ = fit_nls(
-            stochastic_bpr,
+            stochastic_model,
             inputs,
             y_true,
-            p0=[0.15, 4.0, 0.1],
-            bounds=([0.01, 1.01, 0.0], [10.0, 20.0, 5.0])
+            p0=p0,
+            bounds=([0.01, 0.1, -1.0, -5.0, -5.0, -5.0],   # lower
+                    [10.0, 10.0,  1.0,  0.0,  0.0,  0.0])   # upper
         )
         
-        self.params = {'alpha': popt[0], 'beta': popt[1], 'delta': popt[2]}
+        # Step 2: Calculate phi_t with fitted parameters for distribution fitting
+        delta0, delta1, delta2, delta3 = popt[2], popt[3], popt[4], popt[5]
+        varphi = np.exp(delta0 + delta1*Rain + delta2*HeavyRain + delta3*LowVis)
+        phi_t = q / (varphi * C)
+        
+        # Step 3: Fit empirical distribution (Kernel Density Estimation)
+        # Filter out extreme values
+        phi_clean = phi_t[(phi_t > 0) & (phi_t < np.quantile(phi_t, 0.99))]
+        if len(phi_clean) > 10:
+            self.phi_dist = gaussian_kde(phi_clean)
+        else:
+            self.phi_dist = None
+        
+        # Step 4: Calculate E[phi^n] via numerical integration
+        n_param = popt[1]
+        if self.phi_dist is not None:
+            phi_max = phi_clean.max() * 1.5
+            E_phi_n, _ = quad(lambda x: x**n_param * self.phi_dist(x)[0], 0, phi_max)
+        else:
+            # Fallback: use empirical mean
+            E_phi_n = np.mean(phi_clean**n_param)
+        
+        self.params = {
+            'alpha': popt[0],
+            'n': popt[1],
+            'delta0': delta0,
+            'delta1': delta1,
+            'delta2': delta2,
+            'delta3': delta3,
+            'E_phi_n': E_phi_n  # Store for prediction
+        }
         self.is_fitted = True
         return self
         
     def predict(self, df_test: pd.DataFrame) -> np.ndarray:
         t0 = df_test['t_0'].values
-        q = df_test['q_t'].values
-        C = df_test['C'].values
-        Rain = df_test['Rain_t'].values
+        
+        # Use stored E[phi^n] if in mean-prediction mode
+        # Or recalculate phi_t for each test point
+        # Per requirements, we predict E[T] = t0 * (1 + alpha * E[phi^n])
+        # where E[phi^n] is from training distribution
         
         alpha = self.params['alpha']
-        beta = self.params['beta']
-        delta = self.params['delta']
+        E_phi_n = self.params['E_phi_n']
         
-        varphi = np.exp(-delta * Rain)
-        phi = q / (C * varphi)
-        
-        return t0 * (1 + alpha * np.power(phi, beta))
+        # Mean travel time prediction
+        return t0 * (1 + alpha * E_phi_n)

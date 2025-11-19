@@ -153,16 +153,21 @@ class TrafficDataLoader:
 
     def get_train_test_split(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
-        Splits data sequentially: First 3/4 Train, Last 1/4 Test.
+        Splits data chronologically with CONTIGUOUS test block at end of month.
+        Test: Last 7 days (Sept 24-30, 2024)
+        Train: All earlier days (Sept 1-23, 2024)
+        
+        This prevents temporal information leakage and aligns with requirementsNEW.md Section 1.1.
         """
         if self.df is None:
             self.preprocess()
-            
-        n = len(self.df)
-        split_idx = int(n * 0.75)
         
-        self.train_df = self.df.iloc[:split_idx].copy()
-        self.test_df = self.df.iloc[split_idx:].copy()
+        # Define test block: Last 7 days of September 2024
+        test_start_date = pd.Timestamp("2024-09-24 00:00:00")
+        
+        # Split based on timestamp
+        self.test_df = self.df[self.df['timestamp'] >= test_start_date].copy()
+        self.train_df = self.df[self.df['timestamp'] < test_start_date].copy()
         
         print(f"Train set: {len(self.train_df)} records ({self.train_df['timestamp'].min()} to {self.train_df['timestamp'].max()})")
         print(f"Test set: {len(self.test_df)} records ({self.test_df['timestamp'].min()} to {self.test_df['timestamp'].max()})")

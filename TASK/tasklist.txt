@@ -1,0 +1,467 @@
+
+
+## 0. 数据 & 记号统一（所有模型共用）
+
+### 0.1 基本变量（基于 M67_115030402）
+
+对每个 15-min 区间 (t)：
+
+* (T_t^{\text{obs}})：观测 travel time（fused travel time，单位 s）
+* (t_0)：free-flow travel time（固定常数，单位 s）
+* (V_t)：总流量（veh/15min）
+* (C)：理论/标定容量（veh/h）
+* (q_t = 4 V_t)：换算成 veh/h 的 15-min 流量
+* (\text{VOC}_t = q_t / C)：volume-to-capacity 比
+* (s_t)：平均速度（m/s 或 km/h）
+* (L)：link 长度（由 (t_0) 和 free-flow 速度推回）
+
+车辆组成（来自长度分组）：
+
+* 类别 1：≤5.2m（car/small van）
+* 类别 2：5.2–6.6m（large van/minibus）
+* 类别 3：6.6–11.6m（coach/rigid HGV）
+* 类别 4：>11.6m（articulated HGV/long vehicle）
+
+记：
+
+* (V_{1t},V_{2t},V_{3t},V_{4t})：四类车 15-min 流量
+* (V^{\text{HGV}}*t = V*{3t}+V_{4t})
+* (T_t^{\text{HGV}} = V^{\text{HGV}}_t / V_t)：HGV 比例
+
+Daytype（根据你图里的 Table 3.2）：
+
+* (d_t\in{0,\dots,12})，也可以映射到
+
+  * Working day (0–4)
+  * Saturday (5)
+  * Sunday (6)
+  * School holiday (7/9/11)
+  * Bank holiday (12)
+
+Time-of-day：
+
+* (\text{tod_sin}_t = \sin(2\pi \cdot \text{minute_of_day}/1440))
+* (\text{tod_cos}_t = \cos(2\pi \cdot \text{minute_of_day}/1440))
+
+天气（来自 `Data Merged`）：
+
+* (R_t)：降水量（mm，或 0）
+* (W_t)：风速
+* (Vis_t)：能见度
+* `conditions_t`：文本，可映射到 **Dry / Light rain / Heavy rain / Other**
+
+定义天气 dummy：
+
+* (\text{Rain}_t = 1(R_t>0))
+* (\text{HeavyRain}*t = 1(R_t > r*\text{thr}))
+* (\text{LowVis}*t = 1(Vis_t < v*\text{thr}))
+
+---
+
+## 1. 统一实验设计
+
+### 1.1 时间范围 & 划分
+
+* 仅使用 **2024-09-01 – 09-30**，共 2880 条 15-min 记录,有五条数据被我删除了，因为是脏数据。
+* 按时间顺序划分：
+
+  * 训练集：随机 3/4（9 月 1–30 日）
+  * 测试集：随机 1/4（9 月 1–30 日）
+* 所有模型 **必须使用同一划分**，禁止随机打乱，以避免信息泄露。
+
+### 1.2 评价指标
+
+在测试集上对 predicted travel time (T_t^{\text{pred}}) 计算：
+
+* RMSE, MAE, MAPE
+* (R^2)（对比基准 M0）
+* 95% 绝对误差分位数 (P_{95}(|T_t^{\text{pred}}-T_t^{\text{obs}}|))
+
+每个 cluster / 子模型都输出一行到 Benchmark 表。
+
+---
+
+## 2. Cluster A：静态参数 / FD-VDF（A0、A1、A2）
+
+### 2.1 A0 – Baseline BPR（M0）
+
+**定义**
+
+传统 BPR：
+[
+T_t^{(A0)} = t_0\left[1 + 0.15\left(\frac{q_t}{C}\right)^4\right]
+]
+
+* 参数：**无**（(\alpha=0.15,\ \beta=4) 固定）
+* 估计方法：无校准，直接代入
+* 用途：**绝对基准**，其它模型的 (R^2) / RMSE 相对它来比。
+
+---
+
+### 2.2 A1 – Calibrated BPR（静态 α, β）
+
+**定义**
+
+[
+T_t^{(A1)} = t_0\left[1 + \alpha \left(\text{VOC}_t\right)^{\beta}\right]
+]
+
+* 参数向量：(\theta_{A1} = (\alpha,\beta))，要求 (\alpha>0,\ \beta>1)。
+* 数据：(T_t^{\text{obs}}, t_0, \text{VOC}_t)。
+* 目标函数（训练集）：
+
+[
+\min_{\alpha,\beta} \sum_{t\in \mathcal{T}_{\text{train}}}
+\left(T_t^{\text{obs}} - T_t^{(A1)}(\alpha,\beta)\right)^2
+]
+
+* 估计方法：**非线性最小二乘（NLS）**，带约束；初始值可取 (0.15, 4)。
+* 变体（可选）：按 Daytype 拆分（工作日 vs 周末）分别估计一套 (\alpha,\beta)。
+
+---
+
+### 2.3 A2 – FD-基 VDF（单参数 m）
+
+参考“Modified Volume Delay Function Based on Traffic Fundamental Diagram” 中提出的基于 FD 的 VDF，核心思想是：通过流-速 FD 推出密度，再构造一个仅含单参数 (m) 的 VDF。
+
+**步骤**
+
+1. 用 M67 的 (q_t, s_t) 标定 FD（例如三角形或分段 FD）：
+
+   * 参数：(v_f)（自由流速度）、(k_c)（临界密度）、(k_j)（拥挤密度）
+2. 由 FD 推出某个 **“最大流惯性”参数 (m)**（具体定义按照论文中的式子；项目实现时查原式）。
+3. 按论文给出的 VDF 形式（记为 (f_{\text{FD}}(\cdot;m))）构造：
+
+[
+T_t^{(A2)} = t_0 \cdot f_{\text{FD}}!\left(k_t; m\right)
+]
+或在实现中写成
+[
+T_t^{(A2)} = t_0\left[1 + g!\left(\frac{k_t}{k_c}; m\right)\right]
+]
+
+其中 (k_t = q_t/s_t)（密度），(g) 的具体形式严格按文中公式。
+
+**参数与估计**
+
+* 参数：(\theta_{A2} = (v_f,k_c,k_j,m)) 或按文中约定的缩减版本。
+* 估计方法：
+
+  * 先以 NLS 拟合 FD（(v_f,k_c,k_j)）
+  * 再固定 FD，使用 NLS 在训练集上估计 (m)。
+
+---
+
+## 3. Cluster B：动态参数 / DVDF（B1、B2、B3）
+
+### 3.1 B1 – DP-BPR（α(xₜ), β(xₜ)）
+
+参考你自己 canonical form：
+
+[
+T_t^{(B1)} = t_0\left[1 + \alpha(x_t)\left(\text{VOC}_t\right)^{\beta(x_t)}\right]
+]
+
+其中
+
+[
+\log \alpha(x_t) = \eta_0 + \eta^\top x_t,\quad
+\log \beta(x_t) = \gamma_0 + \gamma^\top x_t
+]
+
+* (x_t) 向量建议包含：
+
+  * `tod_sin`, `tod_cos`
+  * One-hot(daytype) 或 working / Saturday / Sunday dummy
+  * 可以选配天气 dummy（Rain, HeavyRain）
+* 参数：(\theta_{B1} = (\eta_0,\eta,\gamma_0,\gamma))
+
+**估计方法**
+
+跟“Developing Next-Generation BPR Functions”里的 4.4 类似，用带平滑正则的 NLS：
+
+[
+\min_{\theta} \sum_{t\in\mathcal{T}_{\text{train}}}
+\left[T_t^{\text{obs}}-T_t^{(B1)}(\theta)\right]^2
+
+* \lambda \sum_{g}|\Delta \theta_g|_2^2
+  ]
+
+- (g) 可按 “相邻时间窗口” 或 “相邻 daytype” 分组，(\Delta\theta_g) 表示相邻组参数差。
+- 约束：通过 log-link 自然保证 (\alpha,\beta>0)。
+
+---
+
+### 3.2 B2 – Rolling-Horizon DVDF（D(t)/m(t) 负荷项）
+
+来自 Pan et al. 的滚动视窗 DVDF 框架：对拥堵期，用 **累积需求 / 平均排放率** 替代 (V/C)。
+
+**关键定义**
+
+* 在每个滚动窗口 (h)（例如 30min 或 60min）里：
+
+  * (D_h(t))：从窗口开始到时刻 (t) 的累积 demand（可用累计流量近似）
+  * (m_h(t))：该窗口内移动平均 discharge rate（近似为容量 C 或下游实测流率的移动平均）
+* 定义时间依赖负荷因子：
+
+[
+\chi_t =
+\begin{cases}
+\text{VOC}_t, & \text{未过饱和}[4pt]
+D_h(t)/m_h(t), & \text{过饱和}
+\end{cases}
+]
+
+**模型**
+
+[
+T_t^{(B2)} = t_0 \left[1 + \alpha \chi_t^\beta\right]
+]
+
+* 参数：(\theta_{B2}=(\alpha,\beta))
+* 估计：在训练集上，用 NLS 拟合（与 A1 一样），但输入是 (\chi_t) 而非 VOC。
+
+滚动窗口的长度和“过饱和判定”规则（如 VOC>0.9）在规范里写死，保证复现。
+
+---
+
+### 3.3 B3 – 随机需求/容量 DVDF（CDC & DDFS）
+
+基于 Zhang et al. 的 “Analytical Model for Travel Time-Based BPR Function with Demand Fluctuation and Capacity Degradation”。
+
+**核心思想**
+
+* 定义路段饱和度 (\phi_t = q_t / (\varphi_t C))，(\varphi_t) 为容量退化系数（由天气/事故引起）。
+* 将 (\phi) 视为随机变量，有密度 (g(\phi))，可用经验分布（从训练集 (\phi_t) 样本拟合）。
+* 链路 travel time 的期望：
+
+[
+\mathbb{E}[T] = t_0\left[1 + \beta, \mathbb{E}[\phi^n]\right]
+]
+
+论文中给出更具体形式（如等价于在 BPR 中对 (\phi^n) 取期望）。
+
+**在 M67 上的实现方案**
+
+1. 先用天气数据构建 (\varphi_t = g(\text{weather}_t))，比如
+   (\varphi_t = \exp(\delta_0 + \delta_1 \text{Rain}_t + \delta_2 \text{HeavyRain}_t))。
+2. 计算训练集所有 (\phi_t = q_t / (\varphi_t C))，用核密度或离散 histogram 拟合 (g(\phi))。
+3. 令模型：
+
+[
+T_t^{(B3)} = t_0\left[1 + \alpha \left(\mathbb{E}[\phi^n]\right)\right]
+]
+
+其中 (\mathbb{E}[\phi^n]) 用上一步经验分布计算。
+
+* 参数：(\theta_{B3}=(\alpha,n,\delta_0,\delta_1,\delta_2))
+* 估计方法：NLS + 可能的分布拟合；此模型更偏“理论 / optional”。
+
+---
+
+## 4. Cluster C：混合车流 / HGV（C1、C2、C3）
+
+### 4.1 C1 – PCU-based BPR
+
+**步骤**
+
+1. 为四类车辆指定 PCU 系数（比如 (p_1=1, p_2=1.5, p_3=2, p_4=3)；具体值可参考 HCM 或相关文献）。
+2. 计算每个时刻的等效流量：
+
+[
+q_t^{\text{pcu}} = 4 \sum_{i=1}^4 p_i V_{it}
+]
+
+3. 定义 (C^{\text{pcu}} = p_1 C_1 + \dots) 或直接把容量按同样系数转换。
+4. 使用 BPR：
+
+[
+T_t^{(C1)} = t_0\left[1 + \alpha \left(\frac{q_t^{\text{pcu}}}{C^{\text{pcu}}}\right)^{\beta}\right]
+]
+
+* 参数：(\theta_{C1} = (\alpha,\beta, p_2,p_3,p_4))（PCU 也可固定不估）。
+* 估计：分两阶段——先固定 PCU 估 (\alpha,\beta)，再微调 PCU（若需要）。
+
+---
+
+### 4.2 C2 – Yun Heavy-Truck Multiplier 模型
+
+文献 “Accounting for the Impact of Heavy Truck Traffic in Volume–Delay Functions in Transportation Planning Models” 基于 CORSIM 仿真得出 speed–flow 函数，形式类似：
+
+[
+S = \frac{S_0}{1 + a (1 + T)^{b} (\text{VOC})^{c}}
+]
+
+其中 (T) 为卡车比例，(S_0) 自由流速度。
+
+在你的数据上：
+
+* (T_t = T_t^{\text{HGV}} = V^{\text{HGV}}_t/V_t)
+* (S_{0}) 可由 free-flow speed 估计
+* 预测 travel time：
+
+[
+T_t^{(C2)} = \frac{L}{S_t^{(C2)}} = \frac{L}{S_0 / (1 + a(1+T_t)^b \text{VOC}_t^c)}
+]
+
+* 参数：(\theta_{C2}=(a,b,c))，不直接搬用佛罗里达仿真给出的常数，而是在 M67 训练集上重新 NLS 标定。
+
+---
+
+### 4.3 C3 – 混合车流 FD-VDF
+
+结合 FD-VDF 与多车型：
+
+1. 分类别构建或整体构建 FD（例如对总流量但让 (k) 含 PCU）。
+2. 用类似 A2 的单参数 (m) 或多参数 FD 模型，但让 (m) 或 (k_c) 显式依赖 HGV 比例 (T_t)。
+3. 最终 travel time：
+
+[
+T_t^{(C3)} = t_0 \cdot f_{\text{FD}}\left(k_t, T_t; \theta_{C3}\right)
+]
+
+* 参数：(\theta_{C3}) 包含 FD 参数 + HGV 效应项。
+* 估计：FD 先用全样本标定，再在训练集上 NLS 调整 HGV 效应。
+
+---
+
+## 5. Cluster D：外部情景 / 可靠性（D1、D2、D3）
+
+### 5.1 D1 – Weather-Adjusted Capacity BPR
+
+利用天气数据让容量成为 (C_t)：
+
+[
+C_t = C \cdot \exp(\delta_0 + \delta_1 \text{Rain}_t + \delta_2 \text{HeavyRain}_t + \delta_3 \text{LowVis}_t)
+]
+
+[
+T_t^{(D1)} = t_0\left[1 + \alpha \left(\frac{q_t}{C_t}\right)^\beta\right]
+]
+
+* 参数：(\theta_{D1}=(\alpha,\beta,\delta_0,\delta_1,\delta_2,\delta_3))
+* 估计：NLS；可以先在 Dry 子集上估 (\alpha,\beta)，再通过全样本估 (\delta)。
+
+---
+
+### 5.2 D2 – Incident / Disruption Penalty BPR
+
+如果后面拿到事故或 roadworks 标记，可用：
+
+[
+T_t^{(D2)} = t_0\left[1 + \alpha \text{VOC}_t^\beta\right]
+
+* \delta_1 I^{\text{incident}}_t + \delta_2 I^{\text{roadwork}}_t
+  ]
+
+- 参数：(\theta_{D2}=(\alpha,\beta,\delta_1,\delta_2))
+- 估计：NLS（与 D1 类似，只是多了 dummy penalty）。
+
+如果暂时没有 incident 数据，D2 可以留作“扩展位”。
+
+---
+
+### 5.3 D3 – Reliability-Based BPR（ETT/TTB）
+
+基于 42 号文献的 ETT 模型：期望路段 travel time 为
+
+[
+\mathbb{E}[T_a] = t_0\left[1 + \beta \int_0^{1/\varphi_a}\phi^n g(\phi),d\phi\right]
+]
+
+在单链路框架下，可以：
+
+1. 用训练集估计 (\phi_t = q_t / (\varphi_t C)) 的经验分布 (g(\phi))；
+2. 数值计算 (\mathbb{E}[\phi^n])；
+3. 取
+
+[
+T_t^{(D3)} = t_0\left[1 + \alpha, \mathbb{E}[\phi^n]\right]
+]
+
+* 参数：(\theta_{D3}=(\alpha,\beta,n)) 以及容量退化系数的参数（如 D1 中的 (\delta)）。
+* 估计：NLS + 分布拟合；适合作为 **travel time reliability baseline**。
+
+---
+
+## 6. Cluster E：机器学习 / Data-Driven（E1、E2、E3）
+
+这里不强行绑死具体算法，只给统一特征与目标，保证可复现。
+
+### 6.1 通用输入特征
+
+对所有 ML 模型：
+
+[
+x_t = \big[
+\text{VOC}_t,\ \text{VOC}_t^2,\ T_t^{\text{HGV}},
+\text{tod_sin}_t,\text{tod_cos}_t,
+\text{onehot}(d_t),
+\text{Rain}_t,\text{HeavyRain}_t,\text{LowVis}_t,
+\text{speed}_t\ \text{(可选)}
+\big]
+]
+
+目标：
+
+[
+y_t = T_t^{\text{obs}}
+]
+
+训练/测试划分与其他 cluster 完全一致。
+
+---
+
+### 6.2 E1 – SVR-BPR Hybrid
+
+* 算法：Support Vector Regression（RBF kernel）
+* 特征：上面的 (x_t)
+* 不约束输出结构，所以属于 Cluster E（非结构化 VDF）。
+
+### 6.3 E2 – Tree-Ensemble（RF / GBRT）
+
+* 算法：Random Forest 或 Gradient Boosted Trees
+* 特征：同上
+* 可以检验非线性、交互效应（如 VOC×Rain）对性能的影响。
+
+### 6.4 E3 – 序列模型（可选）
+
+* 算法：LSTM / Temporal CNN
+* 输入：时间窗口（比如过去 4×15min 的 (x_t) 序列）
+* 输出：当前时刻 (T_t)
+
+这类模型不再有可解释的“参数 α/β”，纯粹作为 **上界 baseline**，对比看 BPR 系列能走多近。
+
+---
+
+## 7. 统一参数估计与结果整理
+
+1. **所有有显式参数的模型（Cluster A–D）**
+   – 一律用 **非线性最小二乘（NLS）** 在训练集上估计，约束条件通过 re-parameterisation（log-link）实现。
+   – 若模型包含分布（B3, D3），先在训练集上做经验分布或简单 parametric 拟合，再在 NLS 里用该分布的解析/数值积分。
+
+2. **Daytype 的用法**
+
+   * 在 DP-BPR（B1）和 ML 模型里作为 one-hot 特征；
+   * 在静态模型（A1）可选方案：按 “Weekday / Saturday / Sunday / Holiday” 分组，各自标定一组 α,β，用来检查稳健性。
+
+3. **车辆长度类别的用法**
+
+   * Cluster C1/C3：生成 PCU 或 HGV 比例；
+   * Cluster B/E：可直接把 `HGV share` 当作特征。
+
+4. **结果表（Benchmark Excel）**
+   每一行代表一个子模型（A0, A1, …, E3），列包括：
+
+   * Cluster
+   * Model ID（A1, C2, …）
+   * 公式简述（文本）
+   * 参数个数
+   * 训练 RMSE, 测试 RMSE, 测试 MAE, 测试 (R^2), P95
+   * 是否用天气、是否用 daytype、是否用 composition（布尔列）
+
+这样整理完之后，任何 AI 或 RA 只要看这份说明书，就可以：
+
+* 知道 **每个 cluster 的确切数学形式**；
+* 明白 **需要从你 M67 数据和天气表里取哪些字段、如何组合**；
+* 用统一的 NLS / ML 训练框架做出可复现的 benchmarking，并把所有模型放在同一张表里比较。
