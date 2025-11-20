@@ -5,12 +5,16 @@ from ..utils.estimation import fit_nls
 
 class C1_PCU_BPR(BaseVDF):
     """
-    C1: PCU-based BPR
-    q_pcu = sum(p_i * V_i) * 4
-    T = t0 * (1 + alpha * (q_pcu / C_pcu)^beta)
+    C1: PCU-based BPR (4 Vehicle Classes)
     
-    We estimate alpha, beta, and PCU factors (p3, p4 for HGV).
-    Assume p1=1 (Car), p2=1.5 (LGV).
+    Vehicle Classes (MIDAS length-based):
+    1. ≤5.2m (cars, small vans) - p1 = 1.0 (baseline)
+    2. >5.2m & ≤6.6m (large vans, minibuses) - p2 ∈ [1.0, 1.5]
+    3. >6.6m & ≤11.6m (coaches, rigid HGVs) - p3 ∈ [1.5, 2.5]
+    4. >11.6m (articulated HGVs) - p4 ∈ [2.0, 4.0]
+    
+    q_pcu = 4 * Σ(p_i * V_i)
+    T = t0 * (1 + α * (q_pcu / C)^β)
     """
     def __init__(self):
         super().__init__("C1_PCU")
@@ -21,58 +25,87 @@ class C1_PCU_BPR(BaseVDF):
         y_true = df_train['T_obs'].values
         C = df_train['C'].values
         
-        # Flows: V_t is total. We need breakdown.
-        # Loader sums them, but we need raw columns or re-extract.
-        # Let's assume loader can provide V1, V2, V3, V4 or we approximate.
-        # Loader provided 'V_HGV_t'. Let's assume V_Light = V_t - V_HGV.
-        # We'll treat Light as Cat1+2 (p=1.1 avg) and HGV as Cat3+4 (p_hgv to be estimated).
+        # Get individual vehicle class flows
+        # Note: If loader doesn't provide V1-V4, we approximate using V_HGV
+        if all(col in df_train.columns for col in ['V1_t', 'V2_t', 'V3_t', 'V4_t']):
+            V1 = df_train['V1_t'].values
+            V2 = df_train['V2_t'].values
+            V3 = df_train['V3_t'].values
+            V4 = df_train['V4_t'].values
+        else:
+            # Fallback: approximate split
+            V_total = df_train['V_t'].values
+            V_HGV = df_train['V_HGV_t'].values
+            V_light = V_total - V_HGV
+            # Assume 70/30 split for light vehicles
+            V1 = V_light * 0.7
+            V2 = V_light * 0.3
+            # Assume 60/40 split for HGVs
+            V3 = V_HGV * 0.6
+            V4 = V_HGV * 0.4
         
-        V_light = df_train['V_t'].values - df_train['V_HGV_t'].values
-        V_hgv = df_train['V_HGV_t'].values
+        def pcu_bpr(inputs, alpha, beta, p2, p3, p4):
+            v1 = inputs[:, 0]
+            v2 = inputs[:, 1]
+            v3 = inputs[:, 2]
+            v4 = inputs[:, 3]
+            c_val = inputs[:, 4]
+            
+            # PCU-weighted flow (p1=1.0 fixed)
+            q_pcu = (v1 * 1.0 + v2 * p2 + v3 * p3 + v4 * p4) * 4
+            voc_pcu = q_pcu / c_val
+            
+            return t0 * (1 + alpha * np.power(voc_pcu, beta))
+            
+        inputs = np.column_stack([V1, V2, V3, V4, C])
         
-        def pcu_bpr(inputs, alpha, beta, p_hgv):
-            v_l = inputs[:, 0]
-            v_h = inputs[:, 1]
-            c_val = inputs[:, 2]
-            
-            # q_pcu = (V_light * 1.0 + V_hgv * p_hgv) * 4
-            q_pcu = (v_l + v_h * p_hgv) * 4
-            
-            # Assume C is in PCU? Or C is veh/h and we scale it?
-            # Usually C is calibrated in PCU/h if using PCUs.
-            # Let's assume C_pcu = C_veh * adjustment?
-            # Or just use ratio.
-            
-            voc = q_pcu / c_val # If C is veh/h, this might be high.
-            # Let's estimate effective C or just alpha handles the scaling.
-            
-            return t0 * (1 + alpha * np.power(voc, beta))
-            
-        inputs = np.column_stack([V_light, V_hgv, C])
-        
+        # NLS with HCM-based PCU bounds
         popt, _ = fit_nls(
             pcu_bpr,
             inputs,
             y_true,
-            p0=[0.15, 4.0, 2.0], # p_hgv guess 2.0
-            bounds=([0.01, 1.01, 1.0], [10.0, 20.0, 5.0])
+            p0=[0.15, 4.0, 1.2, 2.0, 3.0],  # α, β, p2, p3, p4
+            bounds=(
+                [0.01, 1.01, 1.0, 1.5, 2.0],  # lower bounds
+                [10.0, 20.0, 1.5, 2.5, 4.0]   # upper bounds
+            )
         )
         
-        self.params = {'alpha': popt[0], 'beta': popt[1], 'p_hgv': popt[2]}
+        self.params = {
+            'alpha': popt[0],
+            'beta': popt[1],
+            'p2': popt[2],
+            'p3': popt[3],
+            'p4': popt[4]
+        }
         self.is_fitted = True
         return self
         
     def predict(self, df_test: pd.DataFrame) -> np.ndarray:
         t0 = df_test['t_0'].values
         C = df_test['C'].values
-        V_light = df_test['V_t'].values - df_test['V_HGV_t'].values
-        V_hgv = df_test['V_HGV_t'].values
         
-        p_hgv = self.params['p_hgv']
-        q_pcu = (V_light + V_hgv * p_hgv) * 4
-        voc = q_pcu / C
+        # Get vehicle flows (same logic as fit)
+        if all(col in df_test.columns for col in ['V1_t', 'V2_t', 'V3_t', 'V4_t']):
+            V1 = df_test['V1_t'].values
+            V2 = df_test['V2_t'].values
+            V3 = df_test['V3_t'].values
+            V4 = df_test['V4_t'].values
+        else:
+            V_total = df_test['V_t'].values
+            V_HGV = df_test['V_HGV_t'].values
+            V_light = V_total - V_HGV
+            V1 = V_light * 0.7
+            V2 = V_light * 0.3
+            V3 = V_HGV * 0.6
+            V4 = V_HGV * 0.4
         
-        return t0 * (1 + self.params['alpha'] * np.power(voc, self.params['beta']))
+        # Calculate PCU-weighted flow
+        p2, p3, p4 = self.params['p2'], self.params['p3'], self.params['p4']
+        q_pcu = (V1 * 1.0 + V2 * p2 + V3 * p3 + V4 * p4) * 4
+        voc_pcu = q_pcu / C
+        
+        return t0 * (1 + self.params['alpha'] * np.power(voc_pcu, self.params['beta']))
 
 
 class C2_Yun_Truck(BaseVDF):

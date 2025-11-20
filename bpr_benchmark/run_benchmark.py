@@ -7,7 +7,7 @@ from bpr_benchmark.utils.estimation import calculate_metrics
 from bpr_benchmark.models import (
     A0_Baseline, A1_Calibrated, A2_FD_VDF,
     B1_DP_BPR, B2_Rolling_DVDF, B3_Stochastic,
-    C1_PCU_BPR, C2_Yun_Truck,
+    C1_PCU_BPR, C2_Yun_Truck, C3_Mixed_FD_VDF,
     D1_Weather_Capacity, D3_Reliability_ETT,
     E1_SVR, E2_RF
 )
@@ -28,7 +28,7 @@ def main():
     models = [
         A0_Baseline(), A1_Calibrated(), A2_FD_VDF(),
         B1_DP_BPR(), B2_Rolling_DVDF(), B3_Stochastic(),
-        C1_PCU_BPR(), C2_Yun_Truck(),
+        C1_PCU_BPR(), C2_Yun_Truck(), C3_Mixed_FD_VDF(),
         D1_Weather_Capacity(), D3_Reliability_ETT(),
         E1_SVR(), E2_RF()
     ]
